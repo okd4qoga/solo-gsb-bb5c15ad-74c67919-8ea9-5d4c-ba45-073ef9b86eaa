@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from . import schemas as s
 from . import consumptions as con
 from . import reservations as rsv
+from . import reversals as rev
 from . import service
 from . import stocktakes as st
 from . import transfers as tr
@@ -55,9 +56,13 @@ app = FastAPI(
         "- 位置交接:一次提交多个样品的原位置与目标位置,\n"
         "  单事务校验全部样品仍处于请求所述原位置,任一不符整批不变,\n"
         "  全部通过后统一更新位置并记录交接人、时间与变更前后位置,\n"
-        "  支持按样品查询交接历史,按交接单号幂等重放"
+        "  支持按样品查询交接历史,按交接单号幂等重放\n"
+        "- 位置交接整单冲正:按原交接单号、冲正号和操作人提交,读取原单全部明细,\n"
+        "  单事务确认每个样品的最后一次位置交接仍是原单对应明细且当前位置等于原单目标位置,\n"
+        "  任一不符逐项冲突、整单不改;通过后恢复全部样品到原单原位置(含未登记 null),\n"
+        "  另存不可变冲正审计并接入位置历史,保留原交接记录,按冲正号幂等重放与查询"
     ),
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -111,6 +116,21 @@ async def transfer_error_handler(
         status_code=409,
         content={
             "error": "conflict",
+            "conflicts": [c.model_dump() for c in exc.conflicts],
+        },
+    )
+
+
+@app.exception_handler(rev.ReversalError)
+async def reversal_error_handler(
+    _request, exc: rev.ReversalError
+) -> JSONResponse:
+    code = exc.conflicts[0].code if exc.conflicts else "reversal_error"
+    status_code = 404 if code in {"transfer_not_found", "reversal_not_found"} else 409
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": code if status_code == 404 else "conflict",
             "conflicts": [c.model_dump() for c in exc.conflicts],
         },
     )
@@ -582,3 +602,32 @@ def get_transfer_history(
             },
         )
     return tr.get_history(conn, sample_id)
+
+
+# ------------------------------------------------------------ 位置交接冲正
+
+@app.post(
+    "/api/v1/transfers/reversals",
+    response_model=s.LocationTransferReversalResult,
+    tags=["位置交接"],
+    summary="位置交接整单冲正:按原交接单号、冲正号和操作人提交,"
+            "单事务确认最后一次交接仍是原单且位置未变,任一不符逐项冲突、整单不改",
+)
+def create_transfer_reversal(
+    body: s.LocationTransferReversalRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.LocationTransferReversalResult:
+    return rev.create_reversal(conn, body)
+
+
+@app.get(
+    "/api/v1/transfers/reversals/{reversal_no}",
+    response_model=s.LocationTransferReversalResult,
+    tags=["位置交接"],
+    summary="按冲正号查询冲正单及逐项回退明细(幂等回放内容)",
+)
+def get_transfer_reversal(
+    reversal_no: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.LocationTransferReversalResult:
+    return rev.get_reversal(conn, reversal_no)

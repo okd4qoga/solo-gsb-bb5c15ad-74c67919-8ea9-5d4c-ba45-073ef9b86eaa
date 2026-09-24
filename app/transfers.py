@@ -207,22 +207,37 @@ def get_history(
         ])
 
     rows = conn.execute(
-        "SELECT i.transfer_no AS transfer_no, i.sample_id AS sample_id,"
-        " i.seq_index AS seq_index, i.from_location AS from_location,"
-        " i.to_location AS to_location, i.operator AS operator,"
-        " i.created_at AS created_at, t.note AS note"
+        "SELECT kind, transfer_no, reversal_no, sample_id, from_location,"
+        " to_location, operator, created_at, note FROM ("
+        " SELECT 'transfer' AS kind, i.transfer_no AS transfer_no,"
+        "  NULL AS reversal_no, i.sample_id AS sample_id, i.from_location AS"
+        "  from_location, i.to_location AS to_location, i.operator AS operator,"
+        "  i.created_at AS created_at, t.note AS note, i.item_id AS item_id"
         " FROM location_transfer_items i"
         " JOIN location_transfers t ON t.transfer_no = i.transfer_no"
         " WHERE i.sample_id = ?"
-        " ORDER BY i.item_id DESC",
-        (sample_id,),
+        " UNION ALL"
+        " SELECT 'reversal' AS kind, i.transfer_no AS transfer_no,"
+        "  i.reversal_no AS reversal_no, i.sample_id AS sample_id,"
+        "  i.from_location AS from_location, i.to_location AS to_location,"
+        "  i.operator AS operator, i.created_at AS created_at, t.note AS note,"
+        "  i.item_id AS item_id"
+        " FROM location_transfer_reversal_items i"
+        " JOIN location_transfer_reversals t ON t.reversal_no = i.reversal_no"
+        " WHERE i.sample_id = ?"
+        " )"
+        " ORDER BY created_at DESC,"
+        " CASE kind WHEN 'reversal' THEN 0 ELSE 1 END, item_id DESC",
+        (sample_id, sample_id),
     ).fetchall()
     return s.LocationHistoryResponse(
         sample_id=sample_id,
         current_location=sample["location"],
         history=[
             s.LocationHistoryItem(
+                kind=r["kind"],
                 transfer_no=r["transfer_no"],
+                reversal_no=r["reversal_no"],
                 operator=r["operator"],
                 note=r["note"],
                 from_location=r["from_location"],
