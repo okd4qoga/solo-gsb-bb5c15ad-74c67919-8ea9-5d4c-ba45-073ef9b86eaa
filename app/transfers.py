@@ -193,7 +193,7 @@ def create_transfer(
 def get_history(
     conn: sqlite3.Connection, sample_id: str
 ) -> s.LocationHistoryResponse:
-    """按样品查询位置交接历史(最新在前);样品不存在返回 404 冲突。"""
+    """按样品查询位置交接/冲正历史(最新在前);样品不存在返回 404 冲突。"""
     sample = conn.execute(
         "SELECT location FROM samples WHERE sample_id = ?", (sample_id,)
     ).fetchone()
@@ -206,23 +206,38 @@ def get_history(
             )
         ])
 
+    # 交接明细与冲正明细合并为统一位置历史;同毫秒时冲正记录排在交接之前
+    # (冲正必晚于被冲正的交接),同类再按表内自增 id 倒序
     rows = conn.execute(
-        "SELECT i.transfer_no AS transfer_no, i.sample_id AS sample_id,"
-        " i.seq_index AS seq_index, i.from_location AS from_location,"
+        "SELECT kind, transfer_no, reversal_no, from_location, to_location,"
+        " operator, note, created_at FROM ("
+        " SELECT 'transfer' AS kind, i.transfer_no AS transfer_no,"
+        " NULL AS reversal_no, i.from_location AS from_location,"
         " i.to_location AS to_location, i.operator AS operator,"
-        " i.created_at AS created_at, t.note AS note"
+        " t.note AS note, i.created_at AS created_at, i.item_id AS item_id"
         " FROM location_transfer_items i"
         " JOIN location_transfers t ON t.transfer_no = i.transfer_no"
         " WHERE i.sample_id = ?"
-        " ORDER BY i.item_id DESC",
-        (sample_id,),
+        " UNION ALL"
+        " SELECT 'reversal' AS kind, r.transfer_no AS transfer_no,"
+        " i.reversal_no AS reversal_no, i.from_location AS from_location,"
+        " i.to_location AS to_location, i.operator AS operator,"
+        " r.note AS note, i.created_at AS created_at, i.item_id AS item_id"
+        " FROM location_transfer_reversal_items i"
+        " JOIN location_transfer_reversals r ON r.reversal_no = i.reversal_no"
+        " WHERE i.sample_id = ?"
+        " ) ORDER BY created_at DESC,"
+        " CASE kind WHEN 'reversal' THEN 0 ELSE 1 END, item_id DESC",
+        (sample_id, sample_id),
     ).fetchall()
     return s.LocationHistoryResponse(
         sample_id=sample_id,
         current_location=sample["location"],
         history=[
             s.LocationHistoryItem(
+                kind=r["kind"],
                 transfer_no=r["transfer_no"],
+                reversal_no=r["reversal_no"],
                 operator=r["operator"],
                 note=r["note"],
                 from_location=r["from_location"],

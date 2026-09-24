@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from . import schemas as s
 from . import consumptions as con
 from . import reservations as rsv
+from . import reversals as rev
 from . import service
 from . import stocktakes as st
 from . import transfers as tr
@@ -55,9 +56,13 @@ app = FastAPI(
         "- 位置交接:一次提交多个样品的原位置与目标位置,\n"
         "  单事务校验全部样品仍处于请求所述原位置,任一不符整批不变,\n"
         "  全部通过后统一更新位置并记录交接人、时间与变更前后位置,\n"
-        "  支持按样品查询交接历史,按交接单号幂等重放"
+        "  支持按样品查询交接历史,按交接单号幂等重放\n"
+        "- 位置交接冲正:按原交接单号整单回退,单事务确认每个样品的\n"
+        "  最后一次位置交接仍是原单对应明细且当前位置等于原单目标位置,\n"
+        "  任一不符整单不改;通过后恢复全部样品到原单原位置并写不可变\n"
+        "  冲正审计(并入位置历史),原交接记录保留;按冲正号幂等重放与查询"
     ),
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -122,6 +127,22 @@ async def consumption_error_handler(
 ) -> JSONResponse:
     code = exc.conflicts[0].code if exc.conflicts else "consumption_error"
     not_found = {"reservation_not_found", "consumption_not_found"}
+    status_code = 404 if code in not_found else 409
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": code if status_code == 404 else "conflict",
+            "conflicts": [c.model_dump() for c in exc.conflicts],
+        },
+    )
+
+
+@app.exception_handler(rev.ReversalError)
+async def reversal_error_handler(
+    _request, exc: rev.ReversalError
+) -> JSONResponse:
+    code = exc.conflicts[0].code if exc.conflicts else "reversal_error"
+    not_found = {"transfer_not_found", "reversal_not_found"}
     status_code = 404 if code in not_found else 409
     return JSONResponse(
         status_code=status_code,
@@ -565,7 +586,7 @@ def create_transfer(
     "/api/v1/samples/{sample_id}/transfers",
     response_model=s.LocationHistoryResponse,
     tags=["位置交接"],
-    summary="按样品查询位置交接历史(交接人、时间、变更前后位置,最新在前)",
+    summary="按样品查询位置交接/冲正历史(交接人、时间、变更前后位置,最新在前)",
 )
 def get_transfer_history(
     sample_id: str,
@@ -582,3 +603,33 @@ def get_transfer_history(
             },
         )
     return tr.get_history(conn, sample_id)
+
+
+# ---------------------------------------------------------------- 位置交接冲正
+
+@app.post(
+    "/api/v1/transfers/reversals",
+    response_model=s.LocationTransferReversalResult,
+    tags=["位置交接"],
+    summary="位置交接整单冲正:按原交接单号读取全部明细,单事务确认每个样品"
+            "最后一次交接仍是原单明细且当前位置等于原单目标位置,"
+            "任一不符整单不改;通过后全部样品恢复原单原位置",
+)
+def create_transfer_reversal(
+    body: s.LocationTransferReversalRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.LocationTransferReversalResult:
+    return rev.create_reversal(conn, body)
+
+
+@app.get(
+    "/api/v1/transfers/reversals/{reversal_no}",
+    response_model=s.LocationTransferReversalResult,
+    tags=["位置交接"],
+    summary="按冲正号查询首次冲正结果(幂等回放内容)",
+)
+def get_transfer_reversal(
+    reversal_no: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> s.LocationTransferReversalResult:
+    return rev.get_reversal(conn, reversal_no)

@@ -539,17 +539,68 @@ class LocationTransferResult(BaseModel):
 
 
 class LocationHistoryItem(BaseModel):
-    transfer_no: str
-    operator: str = Field(description="交接人")
+    kind: Literal["transfer", "reversal"] = Field(
+        default="transfer",
+        description="transfer=位置交接;reversal=交接冲正(整单回退原交接单)",
+    )
+    transfer_no: str = Field(description="交接单号;冲正记录为被冲正的原交接单号")
+    reversal_no: Optional[str] = Field(
+        default=None, description="冲正号(仅 kind=reversal 时有值)"
+    )
+    operator: str = Field(description="交接人/冲正操作人")
     note: Optional[str] = None
     from_location: Optional[str] = Field(description="变更前位置")
-    to_location: str = Field(description="变更后位置")
-    handover_at: str = Field(description="交接时间(UTC)")
+    to_location: Optional[str] = Field(
+        description="变更后位置;冲正恢复为未登记位置时为 null"
+    )
+    handover_at: str = Field(description="交接/冲正时间(UTC)")
 
 
 class LocationHistoryResponse(BaseModel):
     sample_id: str
     current_location: Optional[str] = Field(description="样品当前所在位置")
     history: list[LocationHistoryItem] = Field(
-        description="按交接时间倒序(最新在前)的位置交接历史"
+        description="按交接时间倒序(最新在前)的位置交接/冲正历史"
     )
+
+
+# ---------------------------------------------------------------- 位置交接冲正
+
+class LocationTransferReversalRequest(BaseModel):
+    """位置交接整单冲正:按原交接单号读取全部明细并整单回退。
+
+    - 冲正号 reversal_no 为幂等键:同号同内容重放返回首次结果,同号不同内容 409
+    - 一张原交接单只允许被冲正一次;重复冲正(换一个冲正号)返回 409
+    - 单事务逐项校验:样品的最后一次位置交接仍是原单对应明细,且当前位置等于
+      原单目标位置;任一不符整单不改
+    """
+
+    reversal_no: str = Field(min_length=1, description="冲正号(幂等键),全局唯一")
+    transfer_no: str = Field(min_length=1, description="被冲正的原交接单号")
+    operator: str = Field(min_length=1, description="冲正操作人(审计必填)")
+    note: Optional[str] = Field(default=None, description="备注,仅用于审计展示")
+
+
+class LocationTransferReversalItemOut(BaseModel):
+    sample_id: str
+    from_location: Optional[str] = Field(
+        description="冲正前位置(即原单目标位置,冲正时已校验样品仍在此处)"
+    )
+    to_location: Optional[str] = Field(
+        description="恢复后位置(即原单原位置,null 表示恢复为未登记位置)"
+    )
+
+
+class LocationTransferReversalResult(BaseModel):
+    reversal_no: str
+    transfer_no: str = Field(description="被冲正的原交接单号")
+    operator: str = Field(description="冲正操作人")
+    note: Optional[str] = None
+    items: list[LocationTransferReversalItemOut] = Field(
+        description="逐项回退明细(顺序与原交接单一致)"
+    )
+    reversed_at: str = Field(description="冲正时间(首次提交落库时间,UTC)")
+    replayed: bool = Field(
+        default=False, description="True 表示命中冲正号幂等,返回首次结果"
+    )
+    created_at: Optional[str] = None

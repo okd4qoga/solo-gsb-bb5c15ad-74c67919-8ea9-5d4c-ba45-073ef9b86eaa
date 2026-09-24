@@ -323,6 +323,63 @@ BEFORE DELETE ON location_transfer_items
 BEGIN
     SELECT RAISE(ABORT, 'location_transfer_items 不可变:禁止删除位置交接明细');
 END;
+
+-- 位置交接冲正单:reversal_no 为幂等键;transfer_no 唯一,即一张原交接单只允许整单冲正一次;
+-- 冲正读取原单全部明细,单事务校验每个样品的最后一次位置交接仍是原单对应明细
+CREATE TABLE IF NOT EXISTS location_transfer_reversals (
+    reversal_no TEXT PRIMARY KEY,
+    transfer_no TEXT NOT NULL UNIQUE,
+    operator    TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    note        TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (transfer_no) REFERENCES location_transfers(transfer_no)
+);
+
+-- 位置交接冲正明细:逐项记录冲正前位置(=原单目标位置)与恢复位置(=原单原位置,
+-- 可为 NULL 表示恢复为未登记);随冲正单单事务写入,触发器禁止 UPDATE/DELETE;
+-- 样品位置历史查询把本表与 location_transfer_items 合并展示
+CREATE TABLE IF NOT EXISTS location_transfer_reversal_items (
+    item_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    reversal_no   TEXT NOT NULL,
+    transfer_no   TEXT NOT NULL,
+    sample_id     TEXT NOT NULL,
+    seq_index     INTEGER NOT NULL,
+    from_location TEXT,
+    to_location   TEXT,
+    operator      TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (reversal_no) REFERENCES location_transfer_reversals(reversal_no),
+    FOREIGN KEY (transfer_no) REFERENCES location_transfers(transfer_no),
+    FOREIGN KEY (sample_id)   REFERENCES samples(sample_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lreversal_no     ON location_transfer_reversal_items(reversal_no);
+CREATE INDEX IF NOT EXISTS idx_lreversal_sample ON location_transfer_reversal_items(sample_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_lreversal_hdr_no_update
+BEFORE UPDATE ON location_transfer_reversals
+BEGIN
+    SELECT RAISE(ABORT, 'location_transfer_reversals 不可变:禁止更新交接冲正单');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_lreversal_hdr_no_delete
+BEFORE DELETE ON location_transfer_reversals
+BEGIN
+    SELECT RAISE(ABORT, 'location_transfer_reversals 不可变:禁止删除交接冲正单');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_lreversal_no_update
+BEFORE UPDATE ON location_transfer_reversal_items
+BEGIN
+    SELECT RAISE(ABORT, 'location_transfer_reversal_items 不可变:禁止更新交接冲正明细');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_lreversal_no_delete
+BEFORE DELETE ON location_transfer_reversal_items
+BEGIN
+    SELECT RAISE(ABORT, 'location_transfer_reversal_items 不可变:禁止删除交接冲正明细');
+END;
 """
 
 
